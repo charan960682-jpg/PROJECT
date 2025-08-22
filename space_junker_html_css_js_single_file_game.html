@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Space Junker — Collect & Dodge</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #0f1630cc;
+      --text: #e9f0ff;
+      --accent: #7aa2ff;
+      --good: #9aff7a;
+      --bad: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      color: var(--text);
+      background: radial-gradient(1200px 800px at 70% 20%, #101a3a 0%, var(--bg) 60%);
+      overflow: hidden;
+    }
+
+    /* Canvas fills viewport */
+    #game {
+      position: fixed; inset: 0; width: 100vw; height: 100vh; display: block;
+      background: transparent; /* stars are drawn in JS */
+    }
+
+    /* HUD */
+    .hud {
+      position: fixed; top: 12px; left: 12px; right: 12px;
+      display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: start;
+      pointer-events: none;
+    }
+    .pill {
+      pointer-events: auto;
+      background: var(--panel); backdrop-filter: blur(6px);
+      border: 1px solid #1e2a5a; color: var(--text);
+      border-radius: 16px; padding: 10px 14px; box-shadow: 0 6px 24px #00000066;
+    }
+    .scorebar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    .tag { opacity: .7; margin-right: 6px; font-weight: 600; letter-spacing: .2px; }
+    .value { font-variant-numeric: tabular-nums; font-weight: 700; }
+
+    .buttons { display: flex; gap: 10px; }
+    button {
+      appearance: none; border: 1px solid #2b3978; color: var(--text);
+      background: linear-gradient(#17234f, #0f183a); border-radius: 14px;
+      padding: 10px 14px; font-weight: 700; letter-spacing: .3px;
+      cursor: pointer; transition: transform .06s ease, box-shadow .2s ease, background .2s ease;
+      box-shadow: 0 6px 18px #0007;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+
+    /* Center overlays */
+    .center {
+      position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none;
+    }
+    .card {
+      pointer-events: auto; max-width: 680px; text-align: center; line-height: 1.4;
+      padding: 26px 24px; border-radius: 20px; border: 1px solid #24336a; background: var(--panel);
+      box-shadow: 0 30px 80px #00000088;
+    }
+    .title { font-size: clamp(28px, 5vw, 42px); margin: 8px 0 12px; }
+    .subtitle { opacity: .8; margin-bottom: 18px; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+           background: #0b122b; border: 1px solid #22306a; padding: 2px 6px; border-radius: 6px; }
+
+    .hidden { display: none !important; }
+    a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div class="hud">
+    <div class="pill scorebar">
+      <div><span class="tag">Score</span><span id="score" class="value">0</span></div>
+      <div><span class="tag">Best</span><span id="best" class="value">0</span></div>
+      <div><span class="tag">Time</span><span id="time" class="value">0.0s</span></div>
+      <div><span class="tag">Lvl</span><span id="lvl" class="value">1</span></div>
+    </div>
+    <div class="buttons">
+      <button id="btnStart">Start</button>
+      <button id="btnPause">Pause</button>
+      <button id="btnRestart">Restart</button>
+    </div>
+  </div>
+
+  <div id="overlayStart" class="center">
+    <div class="card">
+      <div class="title">🚀 Space Junker</div>
+      <div class="subtitle">Collect floating junk, dodge asteroids. It gets faster — how long can you last?</div>
+      <p>
+        Controls: <span class="kbd">WASD</span> or <span class="kbd">Arrow Keys</span> to move,
+        <span class="kbd">P</span> to pause.
+      </p>
+      <p>Tip: Skim past asteroids to build up your nerve… but don’t touch them!</p>
+      <p><button id="btnStartBig">Play Now</button></p>
+    </div>
+  </div>
+
+  <div id="overlayGameOver" class="center hidden">
+    <div class="card">
+      <div class="title">💥 Game Over</div>
+      <div id="finalStats" class="subtitle"></div>
+      <p><button id="btnPlayAgain">Play Again</button></p>
+    </div>
+  </div>
+
+  <script>
+  (() => {
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // HUD elements
+    const elScore = document.getElementById('score');
+    const elBest = document.getElementById('best');
+    const elTime = document.getElementById('time');
+    const elLvl = document.getElementById('lvl');
+    const overlayStart = document.getElementById('overlayStart');
+    const overlayGameOver = document.getElementById('overlayGameOver');
+    const finalStats = document.getElementById('finalStats');
+
+    const btnStart = document.getElementById('btnStart');
+    const btnStartBig = document.getElementById('btnStartBig');
+    const btnPause = document.getElementById('btnPause');
+    const btnRestart = document.getElementById('btnRestart');
+    const btnPlayAgain = document.getElementById('btnPlayAgain');
+
+    // Canvas resize with device pixel ratio
+    const state = {
+      running: false,
+      paused: false,
+      time: 0,
+      startTime: 0,
+      lastTime: 0,
+      score: 0,
+      best: Number(localStorage.getItem('spaceJunkerBest')||0),
+      level: 1,
+      dpr: 1,
+      w: 0, h: 0,
+      keys: new Set(),
+      player: null,
+      junk: [],
+      rocks: [],
+      particles: [],
+      starfield: [],
+      spawnTimers: { junk: 0, rock: 0 },
+    };
+
+    function resize() {
+      const dpr = state.dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const w = state.w = window.innerWidth;
+      const h = state.h = window.innerHeight;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Utility
+    const rand = (a=0,b=1)=>a+Math.random()*(b-a);
+    const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+    const dist2 = (ax,ay,bx,by)=>{ const dx=ax-bx, dy=ay-by; return dx*dx+dy*dy; };
+
+    // Entities
+    function makePlayer() {
+      return {
+        x: state.w/2, y: state.h/2, r: 14, a: 0,
+        vx: 0, vy: 0,
+        speed: 260, // px/s
+        drag: 0.88,
+        blink: 0,
+      };
+    }
+
+    function spawnJunk() {
+      const margin = 40;
+      const side = Math.floor(rand(0,4)); // 0 top,1 right,2 bottom,3 left
+      let x, y;
+      if (side===0) { x=rand(margin,state.w-margin); y=-20; }
+      else if (side===1) { x=state.w+20; y=rand(margin,state.h-margin); }
+      else if (side===2) { x=rand(margin,state.w-margin); y=state.h+20; }
+      else { x=-20; y=rand(margin,state.h-margin); }
+      const angle = Math.atan2(state.h/2 - y, state.w/2 - x) + rand(-0.6,0.6);
+      const speed = rand(60, 120) * (1 + (state.level-1)*0.08);
+      state.junk.push({ x, y, r: 9, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed, spin: rand(-2,2), a: rand(0,Math.PI*2) });
+    }
+
+    function spawnRock() {
+      const margin = 60;
+      const side = Math.floor(rand(0,4));
+      let x, y;
+      if (side===0) { x=rand(margin,state.w-margin); y=-40; }
+      else if (side===1) { x=state.w+40; y=rand(margin,state.h-margin); }
+      else if (side===2) { x=rand(margin,state.w-margin); y=state.h+40; }
+      else { x=-40; y=rand(margin,state.h-margin); }
+      const angle = Math.atan2(state.h/2 - y, state.w/2 - x) + rand(-0.5,0.5);
+      const speed = rand(90, 180) * (1 + (state.level-1)*0.12);
+      const r = rand(16, 34);
+      state.rocks.push({ x, y, r, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed, spin: rand(-1.2,1.2), a: rand(0,Math.PI*2), pts: makeRockShape(r) });
+    }
+
+    function makeRockShape(r) {
+      const n = 10 + Math.floor(rand(0,6));
+      const pts = [];
+      for (let i=0;i<n;i++) {
+        const ang = (i/n)*Math.PI*2;
+        const rad = r * rand(0.75, 1.15);
+        pts.push({x: Math.cos(ang)*rad, y: Math.sin(ang)*rad});
+      }
+      return pts;
+    }
+
+    function burst(x,y,color,count=16) {
+      for (let i=0;i<count;i++) {
+        const a = rand(0,Math.PI*2);
+        const s = rand(40, 200);
+        state.particles.push({x,y, vx:Math.cos(a)*s, vy:Math.sin(a)*s, life: rand(0.3, 0.8), color});
+      }
+    }
+
+    function makeStars() {
+      state.starfield.length = 0;
+      for (let i=0;i<220;i++) {
+        state.starfield.push({ x: rand(0,state.w), y: rand(0,state.h), r: rand(0.5,1.6), tw: rand(0.2,1) });
+      }
+    }
+    makeStars();
+
+    // Input
+    window.addEventListener('keydown', e => {
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+      state.keys.add(e.key.toLowerCase());
+      if (e.key.toLowerCase()==='p') togglePause();
+    });
+    window.addEventListener('keyup', e => state.keys.delete(e.key.toLowerCase()));
+
+    // Game flow
+    function startGame() {
+      overlayStart.classList.add('hidden');
+      overlayGameOver.classList.add('hidden');
+      state.running = true;
+      state.paused = false;
+      state.time = 0;
+      state.level = 1;
+      state.score = 0;
+      elBest.textContent = state.best;
+      state.player = makePlayer();
+      state.junk = [];
+      state.rocks = [];
+      state.particles = [];
+      state.spawnTimers.junk = 0;
+      state.spawnTimers.rock = 0;
+      state.startTime = performance.now();
+      state.lastTime = state.startTime;
+      loop(state.lastTime);
+    }
+
+    function gameOver() {
+      state.running = false;
+      localStorage.setItem('spaceJunkerBest', String(Math.max(state.best, state.score)));
+      state.best = Number(localStorage.getItem('spaceJunkerBest'));
+      finalStats.innerHTML = `Score: <b>${state.score}</b> · Time: <b>${elTime.textContent}</b> · Best: <b>${state.best}</b>`;
+      overlayGameOver.classList.remove('hidden');
+    }
+
+    function togglePause() {
+      if (!state.running) return;
+      state.paused = !state.paused;
+      btnPause.textContent = state.paused ? 'Resume' : 'Pause';
+      if (!state.paused) {
+        state.lastTime = performance.now();
+        loop(state.lastTime);
+      }
+    }
+
+    // Loop
+    function loop(t) {
+      if (!state.running || state.paused) return;
+      const dt = Math.min(0.033, (t - state.lastTime) / 1000);
+      state.lastTime = t;
+      state.time += dt;
+
+      // Difficulty progression
+      const lvl = 1 + Math.floor(state.time / 15); // new level each 15s
+      if (lvl !== state.level) {
+        state.level = lvl;
+        burst(state.w-60, 40, 'rgba(122,162,255,0.8)', 24);
+      }
+
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    function update(dt) {
+      // Spawning (faster with level)
+      state.spawnTimers.junk -= dt;
+      state.spawnTimers.rock -= dt;
+      const junkInterval = clamp(0.8 - (state.level-1)*0.05, 0.28, 0.8);
+      const rockInterval = clamp(1.6 - (state.level-1)*0.07, 0.45, 1.6);
+      if (state.spawnTimers.junk <= 0) { spawnJunk(); state.spawnTimers.junk = junkInterval * rand(0.7,1.3); }
+      if (state.spawnTimers.rock <= 0) { spawnRock(); state.spawnTimers.rock = rockInterval * rand(0.7,1.3); }
+
+      // Player movement
+      const p = state.player;
+      const up = state.keys.has('arrowup') || state.keys.has('w');
+      const down = state.keys.has('arrowdown') || state.keys.has('s');
+      const left = state.keys.has('arrowleft') || state.keys.has('a');
+      const right = state.keys.has('arrowright') || state.keys.has('d');
+      const ax = (right?1:0) - (left?1:0);
+      const ay = (down?1:0) - (up?1:0);
+      const mag = Math.hypot(ax, ay) || 1;
+      p.vx += (ax/mag) * p.speed * dt;
+      p.vy += (ay/mag) * p.speed * dt;
+      p.vx *= p.drag; p.vy *= p.drag;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.x = clamp(p.x, p.r, state.w - p.r);
+      p.y = clamp(p.y, p.r, state.h - p.r);
+      p.a = Math.atan2(p.vy, p.vx);
+      p.blink = Math.max(0, p.blink - dt);
+
+      // Move junk
+      for (let i=state.junk.length-1;i>=0;i--) {
+        const j = state.junk[i];
+        j.x += j.vx * dt; j.y += j.vy * dt; j.a += j.spin * dt;
+        if (j.x < -40 || j.x > state.w+40 || j.y < -40 || j.y > state.h+40) { state.junk.splice(i,1); continue; }
+        // collect
+        const r2 = (p.r + j.r) * (p.r + j.r);
+        if (dist2(p.x,p.y,j.x,j.y) <= r2) {
+          state.junk.splice(i,1);
+          state.score += 10;
+          burst(j.x, j.y, 'rgba(154,255,122,0.9)', 14);
+          p.blink = 0.15;
+        }
+      }
+
+      // Move rocks
+      for (let i=state.rocks.length-1;i>=0;i--) {
+        const r = state.rocks[i];
+        r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt;
+        if (r.x < -60 || r.x > state.w+60 || r.y < -60 || r.y > state.h+60) { state.rocks.splice(i,1); continue; }
+        // collision
+        const r2 = (p.r + r.r*0.9) * (p.r + r.r*0.9);
+        if (dist2(p.x,p.y,r.x,r.y) <= r2) {
+          burst(p.x, p.y, 'rgba(255,107,107,0.9)', 44);
+          gameOver();
+          return;
+        }
+      }
+
+      // Particles
+      for (let i=state.particles.length-1;i>=0;i--) {
+        const q = state.particles[i];
+        q.life -= dt; if (q.life <= 0) { state.particles.splice(i,1); continue; }
+        q.x += q.vx * dt; q.y += q.vy * dt;
+        q.vx *= 0.98; q.vy *= 0.98;
+      }
+
+      // Stars subtle parallax twinkle
+      for (const s of state.starfield) s.tw += (Math.random()-0.5)*0.02;
+
+      // HUD
+      elScore.textContent = state.score;
+      elBest.textContent = Math.max(state.best, state.score);
+      elTime.textContent = state.time.toFixed(1) + 's';
+      elLvl.textContent = state.level;
+    }
+
+    // Drawing
+    function draw() {
+      const w = state.w, h = state.h;
+      ctx.clearRect(0,0,w,h);
+
+      // background stars
+      ctx.save();
+      for (const s of state.starfield) {
+        ctx.globalAlpha = clamp(0.35 + s.tw*0.4, 0.15, 0.85);
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fillStyle = '#a8c0ff'; ctx.fill();
+      }
+      ctx.restore();
+
+      // draw junk
+      for (const j of state.junk) {
+        ctx.save();
+        ctx.translate(j.x, j.y); ctx.rotate(j.a);
+        ctx.strokeStyle = 'rgba(154,255,122,0.9)';
+        ctx.fillStyle = 'rgba(154,255,122,0.12)';
+        ctx.lineWidth = 2;
+        // a tiny irregular polygon to look like scrap
+        ctx.beginPath();
+        for (let i=0;i<6;i++) {
+          const ang = (i/6)*Math.PI*2;
+          const rr = j.r * (0.7 + 0.6*Math.sin(i*2.2));
+          const px = Math.cos(ang)*rr, py = Math.sin(ang)*rr;
+          if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+
+      // draw rocks
+      for (const r of state.rocks) {
+        ctx.save();
+        ctx.translate(r.x, r.y); ctx.rotate(r.a);
+        ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,107,107,0.9)'; ctx.fillStyle = 'rgba(255,107,107,0.08)';
+        ctx.beginPath();
+        ctx.moveTo(r.pts[0].x, r.pts[0].y);
+        for (let i=1;i<r.pts.length;i++) ctx.lineTo(r.pts[i].x, r.pts[i].y);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+
+      // draw player ship
+      const p = state.player;
+      if (p) {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.a);
+        const blink = p.blink > 0 ? (Math.sin(p.blink*50) > 0 ? 1 : 0.3) : 1;
+        ctx.globalAlpha = blink;
+        ctx.lineWidth = 2.5; ctx.strokeStyle = '#7aa2ff';
+        ctx.fillStyle = 'rgba(122,162,255,0.10)';
+        ctx.beginPath();
+        // triangle ship
+        ctx.moveTo(18,0); ctx.lineTo(-12,10); ctx.lineTo(-6,0); ctx.lineTo(-12,-10); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // engine flare if moving
+        const speed = Math.hypot(p.vx, p.vy);
+        if (speed > 10) {
+          ctx.beginPath(); ctx.moveTo(-12,0); ctx.lineTo(-18, 4 + Math.random()*4); ctx.lineTo(-18, -4 - Math.random()*4); ctx.closePath();
+          ctx.fillStyle = 'rgba(122,162,255,0.35)'; ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // particles
+      for (const q of state.particles) {
+        ctx.save(); ctx.globalAlpha = Math.max(0, q.life);
+        ctx.fillStyle = q.color;
+        ctx.beginPath(); ctx.arc(q.x, q.y, 2, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+
+      // vignette
+      const grd = ctx.createRadialGradient(w/2, h/2, Math.min(w,h)*0.25, w/2, h/2, Math.max(w,h)*0.8);
+      grd.addColorStop(0, 'rgba(0,0,0,0)');
+      grd.addColorStop(1, 'rgba(0,0,0,0.35)');
+      ctx.fillStyle = grd; ctx.fillRect(0,0,w,h);
+    }
+
+    // Buttons
+    btnStart.addEventListener('click', startGame);
+    btnStartBig.addEventListener('click', startGame);
+    btnRestart.addEventListener('click', () => { startGame(); });
+    btnPlayAgain.addEventListener('click', startGame);
+    btnPause.addEventListener('click', togglePause);
+
+    // Kick off with idle draw so the canvas looks alive
+    state.player = makePlayer();
+    draw();
+  })();
+  </script>
+</body>
+</html>
